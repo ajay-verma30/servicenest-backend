@@ -7,7 +7,9 @@ app.use(morgan(':method :url :status :res[content-length] - :response-time ms'))
 app.use(cors());
 app.use(express.json());
 
-
+app.get('/', (req, res) => {
+  res.send('ServiceNest Backend Running ✅');
+});
 app.use('/users', require('./routes/users'));
 app.use('/tickets',require('./routes/tickets'));
 app.use('/comments',require('./routes/comments'));
