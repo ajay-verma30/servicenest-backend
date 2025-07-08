@@ -79,17 +79,40 @@ router.get('/my-tickets-summary', authenticateToken, async (req, res) => {
 });
 
 //get ticket based on user role:
-router.get('/all-tickets', authenticateToken, async(req,res)=>{
-    try{
-        if(req.user.role === 'admin' || req.user.role === 'agent'){
-            const [result] = await promiseConn.query("SELECT * FROM tickets");
-            return res.status(200).json({tickets: result});
-        } 
+router.get('/all-tickets', authenticateToken, async (req, res) => {
+  try {
+    if (req.user.role === 'admin' || req.user.role === 'agent') {
+      const { status, priority, page = 1, limit = 10 } = req.query;
+
+      let baseQuery = "SELECT * FROM tickets WHERE 1 = 1";
+      const params = [];
+
+      if (status) {
+        baseQuery += " AND status = ?";
+        params.push(status);
+      }
+
+      if (priority) {
+        baseQuery += " AND priority = ?";
+        params.push(priority);
+      }
+
+      baseQuery += " ORDER BY created_at DESC";
+
+      const offset = (parseInt(page) - 1) * parseInt(limit);
+      baseQuery += " LIMIT ? OFFSET ?";
+      params.push(parseInt(limit), offset);
+
+      const [tickets] = await promiseConn.query(baseQuery, params);
+      return res.status(200).json({ tickets });
+    } else {
+      return res.status(403).json({ message: "Unauthorized access" });
     }
-    catch(e){
-        return res.status(500).json({ message: "Internal Server Error", error: e });
-    }
-})
+  } catch (e) {
+    return res.status(500).json({ message: "Internal Server Error", error: e });
+  }
+});
+
 
 //specific ticket
 router.get('/:id', authenticateToken, async(req,res)=>{
