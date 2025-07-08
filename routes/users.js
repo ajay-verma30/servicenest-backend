@@ -107,7 +107,7 @@ router.post('/verify-otp', async (req, res) => {
 
     await promiseConn.query("UPDATE users SET last_login = NOW() WHERE email = ?", [email]);
 
-    const token = jwt.sign({ id: user.id, email: user.email }, process.env.JWT_SECRET, {
+    const token = jwt.sign({ id: user.id, email: user.email, role:user.role }, process.env.JWT_SECRET, {
       expiresIn: '90m'
     });
     
