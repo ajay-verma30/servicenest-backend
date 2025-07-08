@@ -78,7 +78,18 @@ router.get('/my-tickets-summary', authenticateToken, async (req, res) => {
   }
 });
 
-
+//get ticket based on user role:
+router.get('/all-tickets', authenticateToken, async(req,res)=>{
+    try{
+        if(req.user.role === 'admin' || req.user.role === 'agent'){
+            const [result] = await promiseConn.query("SELECT * FROM tickets");
+            return res.status(200).json({tickets: result});
+        } 
+    }
+    catch(e){
+        return res.status(500).json({ message: "Internal Server Error", error: e });
+    }
+})
 
 //specific ticket
 router.get('/:id', authenticateToken, async(req,res)=>{
