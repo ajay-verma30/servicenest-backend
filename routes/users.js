@@ -131,5 +131,21 @@ router.get('/my-details', authenticateToken, async(req, res) => {
 });
 
 
+//password reset
+router.put('/reset', authenticateToken, async(req,res)=>{
+  try{
+    const {password} = req.body;
+    const {email} = req.user;
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const[result] = await promiseConn.query("UPDATE users SET password = ? WHERE email = ?",[hashedPassword, email]);
+    if(result.affectedRows === 0){
+      return res.status(404).json({message:"User not found or password not updated. Try Again!"})
+    }
+    return res.status(200).json({ message: "Password updated successfully." });
+  }
+  catch(e){
+    return res.status(500).json({message:"Internal Server Error", error:e});
+  }
+})
 
 module.exports = router;
