@@ -59,17 +59,24 @@ router.get('/my-tickets', authenticateToken, async(req,res)=>{
 //summary of my tickets
 router.get('/my-tickets-summary', authenticateToken, async (req, res) => {
   try {
-    const { id } = req.user;
-    console.log(id)
-    const [summary] = await promiseConn.query(`
+    const { id, role } = req.user;
+
+    let query = `
       SELECT 
         COUNT(*) AS total,
         COUNT(CASE WHEN status = 'open' THEN 1 END) AS open,
         COUNT(CASE WHEN status = 'closed' THEN 1 END) AS closed,
         COUNT(CASE WHEN priority = 'high' THEN 1 END) AS high
       FROM tickets
-      WHERE user_id = ?
-    `, [id]);
+    `;
+    let params = [];
+
+    if (role === 'user') {
+      query += ` WHERE user_id = ?`;
+      params.push(id);
+    }
+
+    const [summary] = await promiseConn.query(query, params);
 
     return res.status(200).json({ summary: summary[0] });
 
@@ -77,6 +84,7 @@ router.get('/my-tickets-summary', authenticateToken, async (req, res) => {
     return res.status(500).json({ message: "Internal Server Error", error: e });
   }
 });
+
 
 //get ticket based on user role:
 router.get('/all-tickets', authenticateToken, async (req, res) => {
