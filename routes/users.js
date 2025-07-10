@@ -74,7 +74,7 @@ const expires_at = new Date(Date.now() + 5 * 60 * 1000).toISOString().slice(0, 1
     await promiseConn.query("INSERT INTO user_otps(user_id, otp, expires_at) VALUES(?,?,?)",[
         usermatch.id, otp, expires_at])
     await sentOtp(email, otp)
-    return res.status(200).json({message: "OTP sent successfully", id: usermatch.id})
+    return res.status(200).json({message: "OTP sent successfully"})
     }
   } catch (e) {
     console.error("Error in /users/login:", e.message);
