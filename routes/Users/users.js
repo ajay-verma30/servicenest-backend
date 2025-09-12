@@ -31,10 +31,9 @@ route.post("/new", async (req, res) => {
     const userId = nanoid(5);
     const created_at = new Date();
     const { f_name, l_name, email, password, role, contact, organization } = req.body;
-
     const password_hash = bcrypt.hashSync(password, 10);
     const insertQuery =
-      "INSERT INTO users(id,f_name, l_name, email, password_hash, role, contact, created_at)VALUE(?,?,?,?,?,?,?,?)";
+      "INSERT INTO users(id, f_name, l_name, email, password_hash, role, contact, organization, created_at) VALUES(?,?,?,?,?,?,?,?,?)";
     const [result] = await promiseConn.query(insertQuery, [
       userId,
       f_name,
@@ -43,8 +42,8 @@ route.post("/new", async (req, res) => {
       password_hash,
       role,
       contact,
-      created_at,
-      organization
+      organization,
+      created_at
     ]);
 
     if (result.affectedRows !== 1) {
@@ -54,9 +53,10 @@ route.post("/new", async (req, res) => {
     }
     return res.status(201).json({ message: "User Created" });
   } catch (err) {
+    console.error("User creation error:", err);
     return res
       .status(500)
-      .json({ message: "Internal Server Error", error: err });
+      .json({ message: "Internal Server Error", error: err.message });
   }
 });
 
@@ -123,18 +123,24 @@ route.post("/login", loginLimiter, validateLogin, async (req, res) => {
     );
 
     const hashedToken = await bcrypt.hash(refreshToken, 10);
+    
+    // Fixed: Clean up old tokens first, then insert new one
     await promiseConn.query(
-      `INSERT INTO user_refresh_tokens (user_id, token_hash, expires_at) 
-             VALUES (?, ?, DATE_ADD(NOW(), INTERVAL 7 DAY))
-             ON DUPLICATE KEY UPDATE token_hash = VALUES(token_hash), expires_at = VALUES(expires_at)`,
+      "DELETE FROM user_refresh_tokens WHERE user_id = ?",
+      [user.id]
+    );
+    
+    await promiseConn.query(
+      "INSERT INTO user_refresh_tokens (user_id, token_hash, expires_at) VALUES (?, ?, DATE_ADD(NOW(), INTERVAL 7 DAY))",
       [user.id, hashedToken]
     );
 
+    // Set secure cookie with proper settings
     res.cookie("refreshToken", refreshToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
-      sameSite: "lax",
-      maxAge: 7 * 24 * 60 * 60 * 1000,
+      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
     });
 
     const last_login = new Date();
@@ -144,6 +150,7 @@ route.post("/login", loginLimiter, validateLogin, async (req, res) => {
     ]);
 
     return res.status(200).json({
+      success: true,
       message: "User logged in!",
       token: accessToken,
     });
@@ -156,21 +163,36 @@ route.post("/login", loginLimiter, validateLogin, async (req, res) => {
 route.post("/refresh-token", async (req, res) => {
   try {
     const refreshToken = req.cookies.refreshToken;
+    console.log("Refresh token from cookie:", refreshToken ? "Present" : "Missing");
+    
     if (!refreshToken) {
       return res
         .status(401)
         .json({ success: false, message: "Refresh token missing" });
     }
-    const decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
+
+    let decoded;
+    try {
+      decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
+    } catch (jwtError) {
+      console.error("JWT verification failed:", jwtError.message);
+      return res
+        .status(401)
+        .json({ success: false, message: "Invalid or expired refresh token" });
+    }
+
     if (decoded.type !== "refresh") {
       return res
         .status(401)
         .json({ success: false, message: "Invalid token type" });
     }
+
+    // Check if token exists in database and hasn't expired
     const [rows] = await promiseConn.query(
       "SELECT * FROM user_refresh_tokens WHERE user_id = ? AND expires_at > NOW()",
       [decoded.userId]
     );
+
     if (rows.length === 0) {
       return res
         .status(401)
@@ -179,12 +201,16 @@ route.post("/refresh-token", async (req, res) => {
           message: "Refresh token expired or not found",
         });
     }
+
+    // Verify the token hash matches
     const tokenMatch = await bcrypt.compare(refreshToken, rows[0].token_hash);
     if (!tokenMatch) {
       return res
         .status(401)
         .json({ success: false, message: "Invalid refresh token" });
     }
+
+    // Get user info
     const [userRows] = await promiseConn.query(
       'SELECT id, email, role, organization FROM users WHERE id = ? AND status != "suspended"',
       [decoded.userId]
@@ -195,7 +221,10 @@ route.post("/refresh-token", async (req, res) => {
         .status(401)
         .json({ success: false, message: "User not found or suspended" });
     }
+
     const user = userRows[0];
+
+    // Generate new access token
     const accessToken = jwt.sign(
       {
         userId: user.id,
@@ -228,6 +257,38 @@ route.post("/refresh-token", async (req, res) => {
     return res
       .status(500)
       .json({ success: false, message: "Internal server error" });
+  }
+});
+
+// Added missing logout route
+route.post("/logout", async (req, res) => {
+  try {
+    const refreshToken = req.cookies.refreshToken;
+    
+    if (refreshToken) {
+      try {
+        const decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
+        // Remove refresh token from database
+        await promiseConn.query(
+          "DELETE FROM user_refresh_tokens WHERE user_id = ?",
+          [decoded.userId]
+        );
+      } catch (err) {
+        console.log("Error decoding refresh token during logout:", err.message);
+      }
+    }
+
+    // Clear the cookie
+    res.clearCookie("refreshToken", {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+    });
+
+    return res.status(200).json({ success: true, message: "Logged out successfully" });
+  } catch (error) {
+    console.error("Logout error:", error);
+    return res.status(500).json({ success: false, message: "Internal server error" });
   }
 });
 
@@ -289,7 +350,6 @@ route.get("/:id", authToken, async (req, res) => {
     return res.status(500).json({ error: "Internal Server Error" });
   }
 });
-
 
 route.get('/user/:id', authToken, async (req, res) => {
   try {

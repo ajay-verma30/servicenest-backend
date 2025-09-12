@@ -8,16 +8,17 @@ route.post("/new", async (req, res) => {
   try {
     const team_id = nanoid(4);
     const created_at = new Date();
-    const { title, description, organization_id } = req.body;
+    const { title, description, organization_id, created_by } = req.body;
 
     const insertQuery =
-      "INSERT INTO teams(id,title, description, created_at, organization_id)VALUES(?,?,?,?,?)";
+      "INSERT INTO teams(id,title, description, created_at, organization_id, created_by)VALUES(?,?,?,?,?,?)";
     const [result] = await promiseConn.query(insertQuery, [
       team_id,
       title,
       description,
       created_at,
       organization_id,
+      created_by
     ]);
     if (result.affectedRows !== 1) {
       return res
@@ -34,12 +35,16 @@ route.get("/:orgId/all", async (req, res) => {
   try {
     const { orgId } = req.params;
     const getTeams = `
-        SELECT 
-        t.id,
-        t.title
-        FROM teams t
-        JOIN organizations o ON o.id = t.organization_id
-        WHERE o.id = ?`;
+       SELECT 
+    t.id,
+    t.title,
+    t.created_by,
+    CONCAT(u.f_name, ' ', u.l_name) AS created_by_name
+FROM teams t
+JOIN organizations o ON o.id = t.organization_id
+LEFT JOIN users u ON u.id = t.created_by
+WHERE o.id = ?;
+`;
     const [result] = await promiseConn.query(getTeams, [orgId]);
     if (result.length === 0) {
       return res

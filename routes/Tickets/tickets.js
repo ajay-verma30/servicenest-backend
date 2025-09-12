@@ -1,128 +1,119 @@
-const express = require('express')
-const route = express.Router()
-const { nanoid } = require('nanoid')
-const {body, validationResult} = require('express-validator');
-const mysqlconnect = require('../../db/conn')
+const express = require("express");
+const route = express.Router();
+const { nanoid } = require("nanoid");
+const mysqlconnect = require("../../db/conn");
 const promiseConn = mysqlconnect().promise();
-const authToken =  require('../../Auth/tokenAuthentication')
+const authToken = require("../../Auth/tokenAuthentication");
+const multer = require("multer");
+const path = require("path");
+const fs = require("fs");
 
-const ticketValidationRules = [
-  body('title')
-    .exists().withMessage('title is required')
-    .isString().withMessage('title must be a string')
-    .isLength({ max: 200 }).withMessage('title max length is 200'),
-  
-  body('description')
-    .optional()
-    .isString().withMessage('description must be a string'),
+const uploadDir = path.join(__dirname, '../../uploads'); 
+if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 
-  body('status')
-    .optional()
-    .isIn(['open', 'in_progress', 'resolved', 'closed', 'rejected']).withMessage('invalid status'),
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => cb(null, uploadDir),
+    filename: (req, file, cb) => {
+        const uniqueName = Date.now() + '-' + Math.round(Math.random() * 1e9) + path.extname(file.originalname);
+        cb(null, uniqueName);
+    }
+});
 
-  body('priority')
-    .optional()
-    .isIn(['low', 'medium', 'high', 'urgent']).withMessage('invalid priority'),
+const upload = multer({ storage })
 
-  body('type')
-    .optional()
-    .isIn(['bug', 'feature_request', 'support']).withMessage('invalid type'),
-
-  body('created_by')
-    .exists().withMessage('created_by is required')
-    .isString().withMessage('created_by must be a string')
-    .isLength({ max: 20 }).withMessage('created_by max length is 20'),
-
-  body('assignee_id')
-    .optional()
-    .isString().withMessage('assignee_id must be a string')
-    .isLength({ min: 36, max: 36 }).withMessage('assignee_id must be 36 characters'),
-
-  body('organization_id')
-    .optional()
-    .isString().withMessage('organization_id must be a string')
-    .isLength({ min: 36, max: 36 }).withMessage('organization_id must be 36 characters'),
-
-  body('assigned_team')
-    .optional()
-    .isString().withMessage('assigned_team must be a string')
-    .isLength({ max: 50 }).withMessage('assigned_team max length is 50')
-];
-
-
-route.post('/new', ticketValidationRules, authToken, async(req,res)=>{
-    try{
-        const errors = validationResult(req);
-        if(!errors.isEmpty){
-            return res.status(400).json({ success: false, message:"Validation Failed", errors: errors.array() });
-        }
+route.post('/new', authToken, upload.single('attachment'), async (req, res) => {
+    try {
+        const { title, description, priority, type, created_by, organization_id } = req.body;
         const ticket_id = nanoid(6);
         const created_at = new Date();
-        
-        const {
+
+        const addTicketQuery = `
+            INSERT INTO tickets(id, title, description, priority, type, created_by, created_at, organization_id)
+            VALUES(?,?,?,?,?,?,?,?)`;
+        const [results] = await promiseConn.query(addTicketQuery, [
+            ticket_id,
             title,
-            description,
-            priority,
-            type,
-            created_by
-        } = req.body
+            description || null,
+            priority || 'medium',
+            type || 'support',
+            created_by,
+            created_at,
+            organization_id
+        ]);
 
-        if(!title){
-            return res.status(402).json({message:"Title is mandatory"});
+        if (results.affectedRows !== 1) 
+            return res.status(500).json({ message: "Failed to create ticket" });
+        
+        if (req.file) {
+            const fileUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`;
+
+            await promiseConn.query(
+                `INSERT INTO attachments(ticket_id, file_url, uploaded_by) VALUES(?, ?, ?)`,
+                [ticket_id, fileUrl, created_by]
+            );
         }
-        const addTicket = "INSERT INTO tickets(id, title, description,priority, type, created_by,created_at)VALUES(?,?,?,?,?,?,?)";
-        const [results] = await promiseConn.query(addTicket,[ticket_id,title, description, priority, type, created_by, created_at]);
-        if(results.affectedRows !== 1){
-            return res.status(500).json({message:"Failed to Create ticket"});
-        }
-            return res.status(201).json({message:"Ticket Added to the database"});
-     
+
+        return res.status(201).json({ message: "Ticket added to database" });
+    } catch (error) {
+        console.error("Error creating ticket:", error);
+        return res.status(500).json({ success: false, message: "Internal server error" });
     }
-    catch (error) {
-    console.error('Error creating ticket:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Internal server error'
-    });
-  }
-})
+});
 
-route.get('/all', authToken, async (req, res) => {
+route.get("/:orgId/all", authToken, async (req, res) => {
   try {
+    const { orgId } = req.params;
     const limit = parseInt(req.query.limit, 10) || 50;
     const offset = parseInt(req.query.offset, 10) || 0;
     const { search, status, priority, type, assignee } = req.query;
 
     let baseQuery = `
-      SELECT *
-      FROM tickets
-      WHERE 1=1
+      SELECT 
+        t.id, 
+        t.title, 
+        t.description, 
+        t.status, 
+        t.priority, 
+        t.assignee_id, 
+        t.assigned_team, 
+        t.created_at, 
+        t.updated_at, 
+        CONCAT(u.f_name,' ',u.l_name) as created_by,
+        CONCAT(a.f_name, ' ', a.l_name) AS assignee_name
+      FROM tickets t
+      LEFT JOIN users u ON t.created_by = u.id
+      LEFT JOIN users a ON t.assignee_id = a.id 
+      WHERE t.organization_id = ? 
     `;
-    const params = [];
+
+    const params = [orgId];
+
     if (status) {
-      baseQuery += " AND status = ?";
+      baseQuery += " AND t.status = ?";
       params.push(status);
     }
 
     if (priority) {
-      baseQuery += " AND priority = ?";
+      baseQuery += " AND t.priority = ?";
       params.push(priority);
     }
 
     if (type) {
-      baseQuery += " AND type = ?";
+      baseQuery += " AND t.type = ?";
       params.push(type);
     }
 
     if (assignee) {
-      baseQuery += " AND assignee_id = ?";
+      baseQuery += " AND t.assignee_id = ?";
       params.push(assignee);
     }
+
     if (search) {
-      baseQuery += " AND (title LIKE ? OR description LIKE ?)";
+      baseQuery += " AND (t.title LIKE ? OR t.description LIKE ?)";
       params.push(`%${search}%`, `%${search}%`);
     }
-    baseQuery += " ORDER BY created_at DESC LIMIT ? OFFSET ?";
+
+    baseQuery += " ORDER BY t.created_at DESC LIMIT ? OFFSET ?";
     params.push(limit, offset);
 
     const [tickets] = await promiseConn.query(baseQuery, params);
@@ -130,82 +121,99 @@ route.get('/all', authToken, async (req, res) => {
     return res.status(200).json({
       success: true,
       count: tickets.length,
-      data: tickets
+      data: tickets,
     });
   } catch (error) {
-    console.error('Error fetching tickets:', error);
+    console.error("Error fetching tickets:", error);
     return res.status(500).json({
       success: false,
-      message: 'Internal server error'
+      message: "Internal server error",
     });
   }
 });
 
-route.get('/:id', authToken, async (req, res) => {
+route.get("/:id", authToken, async (req, res) => {
   try {
     const { id } = req.params;
     const [tickets] = await promiseConn.query(
       `SELECT 
-    t.*,
-    CONCAT(cb.f_name, ' ', cb.l_name) AS created_by_name,
-    cb.email AS created_by_email,
-    CONCAT(asg.f_name, ' ', asg.l_name) AS assignee_name,
-    asg.email AS assignee_email,
-    tm.title AS team_title
-FROM tickets t
-JOIN users cb ON t.created_by = cb.id
-LEFT JOIN users asg ON t.assignee_id = asg.id
-LEFT JOIN teams tm ON t.assigned_team = tm.id
-WHERE t.id = ?;`,
+        t.*,
+        CONCAT(cb.f_name, ' ', cb.l_name) AS created_by_name,
+        cb.email AS created_by_email,
+        CONCAT(asg.f_name, ' ', asg.l_name) AS assignee_name,
+        asg.email AS assignee_email,
+        tm.title AS team_title
+      FROM tickets t
+      JOIN users cb ON t.created_by = cb.id
+      LEFT JOIN users asg ON t.assignee_id = asg.id
+      LEFT JOIN teams tm ON t.assigned_team = tm.id
+      WHERE t.id = ?;`,
       [id]
     );
 
     if (tickets.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'No ticket found with this id'
-      });
+      return res.status(404).json({ success: false, message: "No ticket found" });
     }
-
     const ticket = tickets[0];
 
-    const [comments] = await promiseConn.query(
-      `SELECT 
-    c.id,
-    c.ticket_id,
-    c.user_id,
-    c.message,
-    c.is_internal,
-    c.created_at,
-    CONCAT(u.f_name, ' ', u.l_name) AS commented_by,
-    u.email AS commenter_email
-FROM comments c
-JOIN users u ON c.user_id = u.id
-WHERE c.ticket_id = ?
-ORDER BY c.created_at DESC;`,
+    const [ticketAttachments] = await promiseConn.query(
+      `SELECT * FROM attachments WHERE ticket_id = ?`,
       [id]
     );
 
+    const [comments] = await promiseConn.query(
+      `SELECT 
+        c.id,
+        c.ticket_id,
+        c.user_id,
+        c.message,
+        c.is_internal,
+        c.created_at,
+        CONCAT(u.f_name, ' ', u.l_name) AS commented_by,
+        u.email AS commenter_email
+      FROM comments c
+      JOIN users u ON c.user_id = u.id
+      WHERE c.ticket_id = ?
+      ORDER BY c.created_at DESC;`,
+      [id]
+    );
+
+    const commentIds = comments.map(c => c.id);
+    let attachmentsMap = {};
+    if (commentIds.length > 0) {
+      const [commentAttachments] = await promiseConn.query(
+        `SELECT * FROM attachments WHERE comment_id IN (?)`,
+        [commentIds]
+      );
+      commentAttachments.forEach(att => {
+        if (!attachmentsMap[att.comment_id]) attachmentsMap[att.comment_id] = [];
+        attachmentsMap[att.comment_id].push(att);
+      });
+    }
+
+    const commentsWithAttachments = comments.map(comment => ({
+      ...comment,
+      attachments: attachmentsMap[comment.id] || []
+    }));
 
     return res.status(200).json({
       success: true,
       data: {
         ...ticket,
-        comments
-      }
+        attachments: ticketAttachments,       
+        comments: commentsWithAttachments,    
+      },
     });
   } catch (error) {
-    console.error('Error fetching ticket with comments:', error);
+    console.error("Error fetching ticket with comments and attachments:", error);
     return res.status(500).json({
       success: false,
-      message: 'Internal server error'
+      message: "Internal server error",
     });
   }
 });
 
-
-
-route.get('/:orgId/teams', authToken, async (req, res) => {
+route.get("/:orgId/teams", authToken, async (req, res) => {
   try {
     const { orgId } = req.params;
     const [teams] = await promiseConn.query(
@@ -215,11 +223,13 @@ route.get('/:orgId/teams', authToken, async (req, res) => {
     return res.json({ success: true, data: teams });
   } catch (err) {
     console.error(err);
-    return res.status(500).json({ success: false, message: "Internal server error" });
+    return res
+      .status(500)
+      .json({ success: false, message: "Internal server error" });
   }
 });
 
-route.get('/:orgId/teams/:teamId/users', authToken, async (req, res) => {
+route.get("/:orgId/teams/:teamId/users", authToken, async (req, res) => {
   try {
     const { orgId, teamId } = req.params;
     const [users] = await promiseConn.query(
@@ -231,31 +241,40 @@ route.get('/:orgId/teams/:teamId/users', authToken, async (req, res) => {
     return res.json({ success: true, data: users });
   } catch (err) {
     console.error(err);
-    return res.status(500).json({ success: false, message: "Internal server error" });
+    return res
+      .status(500)
+      .json({ success: false, message: "Internal server error" });
   }
 });
 
-
-
-
-route.patch('/:id', authToken, async (req, res) => {
+route.patch("/:id", authToken, async (req, res) => {
   const conn = promiseConn;
   try {
     const { id } = req.params;
     const updates = req.body;
-    const userId = req.user?.id || null; 
+    const userId = req.user?.id || null;
 
     if (Object.keys(updates).length === 0) {
       return res.status(400).json({ message: "No fields to update provided." });
     }
 
-    const allowedUpdates = ['assignee_id', 'assigned_team', 'priority', 'status', 'type'];
+    const allowedUpdates = [
+      "assignee_id",
+      "assigned_team",
+      "priority",
+      "status",
+      "type",
+    ];
     const fieldsToUpdate = {};
 
-
-    const [currentRows] = await conn.query(`SELECT * FROM tickets WHERE id = ?`, [id]);
+    const [currentRows] = await conn.query(
+      `SELECT * FROM tickets WHERE id = ?`,
+      [id]
+    );
     if (currentRows.length === 0) {
-      return res.status(404).json({ success: false, message: 'Ticket not found' });
+      return res
+        .status(404)
+        .json({ success: false, message: "Ticket not found" });
     }
     const currentTicket = currentRows[0];
 
@@ -266,37 +285,42 @@ route.patch('/:id', authToken, async (req, res) => {
     }
 
     if (Object.keys(fieldsToUpdate).length === 0) {
-      return res.status(400).json({ message: "No valid fields to update provided." });
+      return res
+        .status(400)
+        .json({ message: "No valid fields to update provided." });
     }
 
     fieldsToUpdate.updated_at = new Date();
-    const setClause = Object.keys(fieldsToUpdate).map(field => `${field} = ?`).join(', ');
+    const setClause = Object.keys(fieldsToUpdate)
+      .map((field) => `${field} = ?`)
+      .join(", ");
     const values = Object.values(fieldsToUpdate);
     values.push(id);
-
 
     const updateTicketQuery = `UPDATE tickets SET ${setClause} WHERE id = ?`;
     const [result] = await conn.query(updateTicketQuery, values);
 
     if (result.affectedRows === 0) {
-      return res.status(404).json({ success: false, message: 'Ticket not updated' });
+      return res
+        .status(404)
+        .json({ success: false, message: "Ticket not updated" });
     }
 
     const historyInserts = [];
     for (const key in fieldsToUpdate) {
-      if (key === "updated_at") continue; 
+      if (key === "updated_at") continue;
 
       const oldValue = currentTicket[key];
       const newValue = fieldsToUpdate[key];
 
       if (oldValue != newValue) {
         historyInserts.push([
-          id,                
-          key,               
-          oldValue || null,  
-          newValue || null,  
-          userId,            
-          new Date()         
+          id,
+          key,
+          oldValue || null,
+          newValue || null,
+          userId,
+          new Date(),
         ]);
       }
     }
@@ -310,20 +334,18 @@ route.patch('/:id', authToken, async (req, res) => {
 
     return res.json({
       success: true,
-      message: 'Ticket updated successfully'
+      message: "Ticket updated successfully",
     });
-
   } catch (error) {
-    console.error('Error updating the ticket:', error);
+    console.error("Error updating the ticket:", error);
     return res.status(500).json({
       success: false,
-      message: 'Internal server error'
+      message: "Internal server error",
     });
   }
 });
 
-
-route.get('/:id/updates', authToken, async (req, res) => {
+route.get("/:id/updates", authToken, async (req, res) => {
   try {
     const { id } = req.params;
     const query = `
@@ -338,91 +360,136 @@ route.get('/:id/updates', authToken, async (req, res) => {
     const [rows] = await promiseConn.query(query, [id]);
     return res.json({ success: true, data: rows });
   } catch (error) {
-    console.error('Error fetching updates:', error);
-    return res.status(500).json({ success: false, message: 'Internal server error' });
+    console.error("Error fetching updates:", error);
+    return res
+      .status(500)
+      .json({ success: false, message: "Internal server error" });
   }
 });
 
-
-
-
-
-
-//API's for dashboard 
-
-route.get('/:orgId/dashboard/overview', authToken, async (req, res) => {
+route.get("/:orgId/dashboard/overview", authToken, async (req, res) => {
   try {
     const { orgId } = req.params;
+    const range = parseInt(req.query.range, 10) || 30;
 
-    // 1. Tickets by status
+    const startDate = new Date();
+    startDate.setDate(startDate.getDate() - range);
+    const startDateStr = startDate.toISOString().slice(0, 19).replace("T", " ");
+
     const [statusStats] = await promiseConn.query(
       `SELECT status, COUNT(*) as count
        FROM tickets
-       WHERE organization_id = ?
+       WHERE organization_id = ? AND created_at >= ?
        GROUP BY status`,
-      [orgId]
+      [orgId, startDateStr]
     );
 
-    // 2. Tickets by priority
     const [priorityStats] = await promiseConn.query(
       `SELECT priority, COUNT(*) as count
        FROM tickets
-       WHERE organization_id = ?
+       WHERE organization_id = ? AND created_at >= ?
        GROUP BY priority`,
-      [orgId]
+      [orgId, startDateStr]
     );
 
-    // 3. Tickets created per day (last 30 days)
     const [dailyStats] = await promiseConn.query(
       `SELECT DATE(created_at) as date, COUNT(*) as count
        FROM tickets
-       WHERE organization_id = ?
+       WHERE organization_id = ? AND created_at >= ?
        GROUP BY DATE(created_at)
        ORDER BY date DESC
-       LIMIT 30`,
-      [orgId]
+       LIMIT ${range}`,
+      [orgId, startDateStr]
     );
 
-    // 4. Tickets per team
     const [teamStats] = await promiseConn.query(
       `SELECT tm.title as team, COUNT(t.id) as count
        FROM tickets t
        LEFT JOIN teams tm ON t.assigned_team = tm.id
-       WHERE t.organization_id = ?
+       WHERE t.organization_id = ? AND t.created_at >= ?
        GROUP BY tm.title`,
-      [orgId]
+      [orgId, startDateStr]
     );
 
-   
-
     const [lastTenTickets] = await promiseConn.query(
-  `SELECT id, title, status, priority, created_at
-   FROM tickets
-   WHERE organization_id = ?
-   ORDER BY created_at DESC
-   LIMIT 10`,
-  [orgId] 
-);
+      `SELECT id, title, status, priority, created_at
+       FROM tickets
+       WHERE organization_id = ? AND created_at >= ?
+       ORDER BY created_at DESC
+       LIMIT 10`,
+      [orgId, startDateStr]
+    );
+
+    const [totalStats] = await promiseConn.query(
+      `SELECT 
+         COUNT(*) as totalTickets,
+         SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) as openTickets,
+         SUM(CASE WHEN status = 'resolved' THEN 1 ELSE 0 END) as resolvedTickets
+       FROM tickets
+       WHERE organization_id = ? AND created_at >= ?`,
+      [orgId, startDateStr]
+    );
+
     return res.json({
       success: true,
       data: {
+        totalTickets: totalStats[0]?.totalTickets || 0,
+        openTickets: totalStats[0]?.openTickets || 0,
+        resolvedTickets: totalStats[0]?.resolvedTickets || 0,
         status: statusStats,
         priority: priorityStats,
         daily: dailyStats,
         teams: teamStats,
-        recent: lastTenTickets
-      }
+        recent: lastTenTickets,
+      },
     });
-
   } catch (error) {
-    console.error('Error fetching dashboard overview:', error);
+    console.error("Error fetching dashboard overview:", error);
     return res.status(500).json({
       success: false,
-      message: 'Internal server error'
+      message: "Internal server error",
     });
   }
 });
 
+route.get('/:id/my', authToken, async (req, res) => {
+  try {
+    const { id } = req.params;
 
+    const myTicketsQuery = `
+      SELECT  
+        CONCAT(cb.f_name, ' ', cb.l_name) AS created_by,
+        t.title,
+        t.id,
+        t.status,
+        t.priority,
+        t.assigned_team,
+        t.created_at,
+        t.updated_at
+      FROM tickets t
+      JOIN users cb ON t.created_by = cb.id
+      WHERE t.assignee_id = ?
+      ORDER BY t.created_at DESC
+    `;
 
-module.exports = route
+    const [results] = await promiseConn.query(myTicketsQuery, [id]);
+
+    if (results.length === 0) {
+      return res.status(404).json({ message: "No tickets assigned to you yet!" });
+    }
+
+    return res.status(200).json({
+      success: true,
+      count: results.length,
+      data: results,
+    });
+  } catch (error) {
+    console.error("Error fetching assigned tickets:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error",
+    });
+  }
+});
+
+module.exports = route;
