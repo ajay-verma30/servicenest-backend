@@ -252,7 +252,7 @@ route.patch("/:id", authToken, async (req, res) => {
   try {
     const { id } = req.params;
     const updates = req.body;
-    const userId = req.user?.id || null;
+    const userId = req.user?.id || req.user?.userId || null;
 
     if (Object.keys(updates).length === 0) {
       return res.status(400).json({ message: "No fields to update provided." });
