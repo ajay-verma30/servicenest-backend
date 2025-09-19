@@ -413,7 +413,8 @@ route.patch("/:id/team", authToken, async (req, res) => {
 /**
  * Get All Users
  */
-route.get("/all", authToken, async (req, res) => {
+route.get("/:orgId/all", authToken, async (req, res) => {
+  const {orgId} = req.params;
   try {
     const getUsers = `
       SELECT 
@@ -429,9 +430,10 @@ route.get("/all", authToken, async (req, res) => {
       FROM users u
       LEFT JOIN user_roles ur ON u.id = ur.user_id
       LEFT JOIN roles r ON ur.roles_id = r.id
+      WHERE organization = ?
       GROUP BY u.id
     `;
-    const [result] = await promiseConn.query(getUsers);
+    const [result] = await promiseConn.query(getUsers,[orgId]);
     if (result.length === 0) {
       return res.status(404).json({ error: "No users Available" });
     }
